@@ -185,12 +185,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"\n*{person}*")
         lines.append(" | ".join(row))
 
-    # 📈 Trend
-    lines.append("")
-    lines.append(trend_text)
-
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
 
 # =========================
 # BOOT
