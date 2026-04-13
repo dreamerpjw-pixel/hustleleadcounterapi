@@ -54,9 +54,23 @@ def build_trend_text(today_totals, yesterday_totals):
 
 # Aggregate totals
 totals = defaultdict(int)
-for person, workshops in data.items():
-    for w, count in workshops.items():
-        totals[w] += count
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    data = parse_leads(update.message.text)
+
+    if not data:
+        await update.message.reply_text("No data found — check the format.")
+        return
+
+    from collections import defaultdict
+
+    totals = defaultdict(int)
+
+    for person, workshops in data.items():
+        for w, count in workshops.items():
+            totals[w] += count
 
 # 🔥 NEW: Trend tracking
 save_today_totals(dict(totals))
