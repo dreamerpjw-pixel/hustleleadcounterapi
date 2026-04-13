@@ -27,13 +27,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     flagged = [n for n, total in workshops if total == 0]
     ok     = [n for n, total in workshops if total > 0]
 
-    lines = [ff"Checked {len(workshops)} workshops\n"]
+    lines = [f"Checked {len(workshops)} workshops\n"]
     if flagged:
         lines.append("\nZERO LEADS — action needed:")
-        lines += [ff"  - {w}" for w in flagged]
+        lines += [f"  - {w}" for w in flagged]
     if ok:
         lines.append("\nActive workshops:")
-        lines += [ff"  - {w}" for w in ok]
+        lines += [f"  - {w}" for w in ok]
 
     await update.message.reply_text("\n".join(lines))
 
