@@ -1,8 +1,10 @@
 import os
 import re
 import json
+import csv
 from datetime import datetime, timedelta
 from collections import defaultdict
+from io import StringIO
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
@@ -18,7 +20,39 @@ if not TOKEN:
 
 
 # =========================
-# PARSER (WhatsApp-friendly)
+# WORKSHOP ALIAS MAP 🧠
+# =========================
+WORKSHOP_MAP = {
+    "Photography": "PPE",
+    "Videography": "VVE",
+    "Acrylic Painting": "CCA",
+    "Digital Art": "DAR",
+    "Watercolour": "WAR",
+    "DSLR Photography": "DSLR",
+    "Canva Social Media": "CSM",
+    "Canva Pro": "GDC",
+    "DJ Sound Mixing": "PSM",
+    "General AI": "PHG",
+    "Music Production": "DMP",
+    "Guitar": "GMP",
+    "Public Speaking": "PPS",
+    "AI Video": "AVC",
+    "Money Management": "MMW",
+    "Leica": "LVS",
+    "Negotiation": "BNG",
+    "Floral Styling": "FPS",
+    "Perfume": "SPD",
+    "Vibe Coding": "AIC"
+}
+
+
+def normalize_workshop(name: str) -> str:
+    name = name.strip()
+    return WORKSHOP_MAP.get(name, name)
+
+
+# =========================
+# PARSER (TEXT MODE)
 # =========================
 def parse_leads(text):
     data = {}
@@ -27,26 +61,22 @@ def parse_leads(text):
     for line in text.split("\n"):
         line = line.strip()
 
-        # Skip WhatsApp timestamps
         if line.startswith("["):
             continue
 
-        # Detect names (*Ryan* or plain names)
         if line.startswith("*") and line.endswith("*"):
             current_person = line.strip("*")
             data[current_person] = {}
             continue
 
-        # Plain name line (Phoebe, Khian, etc.)
         if line and not any(c.isdigit() for c in line) and ":" not in line:
             current_person = line
             data[current_person] = {}
             continue
 
-        # Match workshop patterns:
         match = re.match(r"([A-Za-z]+)\s*[-:]?\s*(\d+)", line)
         if match and current_person:
-            workshop = match.group(1).strip()
+            workshop = normalize_workshop(match.group(1))
             count = int(match.group(2))
             data[current_person][workshop] = count
 
@@ -54,7 +84,32 @@ def parse_leads(text):
 
 
 # =========================
-# STORAGE (trend tracking)
+# PARSER (CSV MODE)
+# =========================
+def parse_csv(file_bytes):
+    data = defaultdict(dict)
+
+    content = file_bytes.decode("utf-8")
+    reader = csv.reader(StringIO(content))
+
+    for row in reader:
+        if len(row) < 3:
+            continue
+
+        person = row[0].strip()
+        workshop = normalize_workshop(row[1])
+        try:
+            count = int(row[2])
+        except:
+            continue
+
+        data[person][workshop] = count
+
+    return data
+
+
+# =========================
+# STORAGE
 # =========================
 def save_today_totals(totals):
     today = datetime.now().strftime("%Y-%m-%d")
@@ -95,10 +150,7 @@ def build_trend_text(today, yesterday):
         elif diff < 0:
             lines.append(f"{w} ↓ {diff}")
         else:
-            if today.get(w, 0) == 0:
-                lines.append(f"{w} → 0 💀")
-            else:
-                lines.append(f"{w} → {today.get(w, 0)}")
+            lines.append(f"{w} → {today.get(w, 0)}")
 
     return "\n".join(lines)
 
@@ -107,18 +159,29 @@ def build_trend_text(today, yesterday):
 # MAIN HANDLER
 # =========================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
 
-    text = update.message.text
-    data = parse_leads(text)
+    data = {}
+
+    # =========================
+    # CSV INPUT 📎
+    # =========================
+    if update.message.document:
+        file = await update.message.document.get_file()
+        file_bytes = await file.download_as_bytearray()
+        data = parse_csv(file_bytes)
+
+    # =========================
+    # TEXT INPUT 💬
+    # =========================
+    elif update.message.text:
+        data = parse_leads(update.message.text)
 
     if not data:
         await update.message.reply_text("No data found — check format.")
         return
 
     # =========================
-    # Aggregate totals
+    # AGGREGATE
     # =========================
     totals = defaultdict(int)
 
@@ -129,14 +192,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     totals_dict = dict(totals)
 
     # =========================
-    # Save + trends
+    # SAVE + TREND
     # =========================
     save_today_totals(totals_dict)
     yesterday = get_yesterday_totals()
     trend_text = build_trend_text(totals_dict, yesterday)
 
     # =========================
-    # Categories
+    # ANALYTICS
     # =========================
     sorted_workshops = sorted(totals.items(), key=lambda x: x[1], reverse=True)
 
@@ -147,49 +210,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today_date = datetime.now().strftime("%d %b %Y")
 
     # =========================
-    # BUILD DASHBOARD
+    # DASHBOARD BUILD
     # =========================
     lines = [f"📊 *WORKSHOP DASHBOARD — {today_date}*\n"]
 
-    # 🏆 Top
     lines.append("🏆 *Top Workshops*")
     for i, (w, v) in enumerate(top, 1):
         lines.append(f"{i}. {w} — {v}")
     lines.append("")
 
-    # 🚨 Zero
     if zero:
         lines.append("🚨 *Needs Attention (0 leads)*")
         for w in zero:
             lines.append(f"• {w} — 0 ❌")
         lines.append("")
 
-    # ⚠️ Low
     if low:
         lines.append("⚠️ *Low Leads (1–2)*")
         for w in low:
             lines.append(f"• {w} — {totals[w]} ⚠️")
         lines.append("")
 
-    # 👤 By Salesperson
     lines.append("👤 *By Salesperson*")
     for person, workshops in data.items():
-        row = []
+        rows = []
         for w, v in workshops.items():
             if v == 0:
-                row.append(f"{w} {v} ❌")
-            elif 1 <= v <= 2:
-                row.append(f"{w} {v} ⚠️")
+                rows.append(f"{w} {v} ❌")
+            elif v <= 2:
+                rows.append(f"{w} {v} ⚠️")
             else:
-                row.append(f"{w} {v}")
+                rows.append(f"{w} {v}")
+
         lines.append(f"\n*{person}*")
-        lines.append(" | ".join(row))
+        lines.append(" | ".join(rows))
+
+    lines.append("\n" + trend_text)
+
+    # =========================
+    # SEND OUTPUT
+    # =========================
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 # =========================
 # BOOT
 # =========================
 app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+app.add_handler(MessageHandler(filters.ALL, handle_message))
 
 app.run_polling()
