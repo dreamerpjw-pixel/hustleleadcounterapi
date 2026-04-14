@@ -1,34 +1,50 @@
 import os
-import re
-import json
 import csv
-from datetime import datetime, timedelta
-from collections import defaultdict
+import re
 from io import StringIO
+from collections import defaultdict
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 
-# =========================
-# CONFIG
-# =========================
 TOKEN = os.getenv("BOT_TOKEN")
-DATA_FILE = "history.json"
-
 if not TOKEN:
-    raise ValueError("BOT_TOKEN is not set in environment variables")
+    raise ValueError("BOT_TOKEN is not set")
+
+# =========================
+# STATE STORAGE 🧠
+# =========================
+user_state = {}
 
 
 # =========================
-# WORKSHOP ALIAS MAP 🧠
+# RULE ENGINE
 # =========================
+IGNORE = {"PCA"}
+MERGE = {
+    "CAM": "DSLR",
+    "PPECAM": "DSLR"
+}
+
+
+def normalize(w):
+    return w.strip().upper()
+
+
+def apply_rules(w):
+    if w in IGNORE:
+        return None
+    if w in MERGE:
+        return MERGE[w]
+    return w
+
 WORKSHOP_MAP = {
     "Photography": "PPE",
     "Videography": "VVE",
     "Acrylic Painting": "CCA",
     "Digital Art": "DAR",
     "Watercolour": "WAR",
-    "DSLR Photography": "DSLR",
+    "DSLR": "DSLR",
     "Canva Social Media": "CSM",
     "Canva Pro": "GDC",
     "DJ Sound Mixing": "PSM",
@@ -40,187 +56,203 @@ WORKSHOP_MAP = {
     "Money Management": "MMW",
     "Leica": "LVS",
     "Negotiation": "BNG",
-    "Floral Styling": "FPS",
+    "Floral Arrangement": "FPS",
     "Perfume": "SPD",
     "Vibe Coding": "AIC"
 }
-
-
-def normalize_workshop(name: str) -> str:
-    name = name.strip()
-    return WORKSHOP_MAP.get(name, name)
-
+WORKSHOP_MAP = {k.upper(): v for k, v in WORKSHOP_MAP.items()}
 
 # =========================
-# PARSER (TEXT MODE)
+# STEP 1: CSV PARSER
 # =========================
-def parse_leads(text):
-    data = {}
-    current_person = None
-
-    for line in text.split("\n"):
-        line = line.strip()
-
-        if line.startswith("["):
-            continue
-
-        if line.startswith("*") and line.endswith("*"):
-            current_person = line.strip("*")
-            data[current_person] = {}
-            continue
-
-        if line and not any(c.isdigit() for c in line) and ":" not in line:
-            current_person = line
-            data[current_person] = {}
-            continue
-
-        match = re.match(r"([A-Za-z]+)\s*[-:]?\s*(\d+)", line)
-        if match and current_person:
-            workshop = normalize_workshop(match.group(1))
-            count = int(match.group(2))
-            data[current_person][workshop] = count
-
-    return data
+def clean_csv_workshop(raw):
+    # removes date / extra metadata like:
+    # "Photography - 6 Apr" → "Photography"
+    return raw.split("-")[0].split("(")[0].strip()
 
 
-# =========================
-# PARSER (CSV MODE)
-# =========================
 def parse_csv(file_bytes):
-    data = defaultdict(dict)
+    data = defaultdict(int)
 
     content = file_bytes.decode("utf-8")
     reader = csv.reader(StringIO(content))
 
     for row in reader:
-        if len(row) < 3:
+        if len(row) < 2:
             continue
 
-        person = row[0].strip()
-        workshop = normalize_workshop(row[1])
+        # 1. clean raw workshop name
+        raw_name = normalize(row[0])
+        clean_name = clean_csv_workshop(raw_name)
+
+        # 2. map full name → workshop code
+        workshop = WORKSHOP_MAP.get(clean_name, clean_name)
+
+        # 3. apply ignore / merge rules
+        workshop = apply_rules(workshop)
+
+        if not workshop:
+            continue
+
+        # 4. parse count safely
         try:
-            count = int(row[2])
+            count = int(row[1])
         except:
             continue
 
-        data[person][workshop] = count
+        data[workshop] += count
 
-    return data
+    return dict(data)
 
 
 # =========================
-# STORAGE
+# STEP 2: TEXT PARSER
 # =========================
-def save_today_totals(totals):
-    today = datetime.now().strftime("%Y-%m-%d")
+def parse_text(text):
+    data = defaultdict(int)
+    current = None
 
-    try:
-        with open(DATA_FILE, "r") as f:
-            history = json.load(f)
-    except:
-        history = {}
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("["):
+            continue
 
-    history[today] = totals
+        if line.startswith("*") and line.endswith("*"):
+            current = line.strip("*")
+            continue
 
-    with open(DATA_FILE, "w") as f:
-        json.dump(history, f)
+        match = re.match(r"(.+?)\s*[-:]?\s*([\d,]+)", line)
+        count = int(match.group(2).replace(",", ""))
+        if match:
+            w = apply_rules(normalize(match.group(1)))
+            if not w:
+                continue
 
+            data[w] += int(match.group(2))
 
-def get_yesterday_totals():
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-
-    try:
-        with open(DATA_FILE, "r") as f:
-            history = json.load(f)
-        return history.get(yesterday, {})
-    except:
-        return {}
+    return dict(data)
 
 
-def build_trend_text(today, yesterday):
-    lines = ["📈 *TREND TRACKER*"]
+# =========================
+# STEP 3: LEAKAGE ENGINE 🔍
+# =========================
+def compare(baseline, reported):
+    all_keys = set(baseline) | set(reported)
 
-    all_keys = set(today.keys()) | set(yesterday.keys())
+    result = []
 
-    for w in sorted(all_keys):
-        diff = today.get(w, 0) - yesterday.get(w, 0)
+    for k in sorted(all_keys):
+        base = baseline.get(k, 0)
+        rep = reported.get(k, 0)
+
+        diff = base - rep
 
         if diff > 0:
-            lines.append(f"{w} ↑ +{diff}")
+            status = f"🔻 Leakage: {diff}"
         elif diff < 0:
-            lines.append(f"{w} ↓ {diff}")
+            status = f"⚠️ Over-reporting: {abs(diff)}"
         else:
-            lines.append(f"{w} → {today.get(w, 0)}")
+            status = "✅ Matched"
+
+        result.append((k, base, rep, status))
+
+    return result
+
+
+# =========================
+# FORMAT OUTPUT 📊
+# =========================
+def build_report(comparison):
+    lines = ["📊 *LEAKAGE REPORT*\n"]
+
+    for k, base, rep, status in comparison:
+        lines.append(f"{k}")
+        lines.append(f"Baseline: {base} | Reported: {rep} | {status}")
+        lines.append("")
 
     return "\n".join(lines)
 
 
 # =========================
-# MAIN HANDLER
+# HANDLER (STATE MACHINE) ⚙️
 # =========================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
 
-    data = {}
+    if user_id not in user_state:
+        user_state[user_id] = {"step": 1, "baseline": {}, "reported": {}}
 
-    # =========================
-    # CSV INPUT 📎
-    # =========================
-    if update.message.document:
-        file = await update.message.document.get_file()
-        file_bytes = await file.download_as_bytearray()
-        data = parse_csv(file_bytes)
+    state = user_state[user_id]
+    msg = update.message
 
     # =========================
-    # TEXT INPUT 💬
+    # STEP 1: CSV UPLOAD
     # =========================
-    elif update.message.text:
-        data = parse_leads(update.message.text)
+    if state["step"] == 1:
+        if msg.document:
+            file = await msg.document.get_file()
+            file_bytes = await file.download_as_bytearray()
+            
+            content = file_bytes.decode("utf-8", errors="ignore")
+            state["step"] = 2
 
-    if not data:
-        await update.message.reply_text("No data found — check format.")
+            await msg.reply_text("✅ Baseline CSV saved. Now paste reported text leads.")
+        else:
+            await msg.reply_text("📎 Please upload CSV first.")
         return
 
     # =========================
-    # AGGREGATE
+    # STEP 2: TEXT INPUT
     # =========================
-    totals = defaultdict(int)
+    if state["step"] == 2:
+        if msg.text:
+            state["reported"] = parse_text(msg.text)
+            state["step"] = 3
 
-    for person, workshops in data.items():
-        for w, count in workshops.items():
-            totals[w] += count
+            await msg.reply_text("✅ Reported data saved. Generating reports...")
 
-    totals_dict = dict(totals)
+            baseline = state["baseline"]
+            reported = state["reported"]
 
-    # =========================
-    # SAVE + TREND
-    # =========================
-    save_today_totals(totals_dict)
-    yesterday = get_yesterday_totals()
-    trend_text = build_trend_text(totals_dict, yesterday)
+            # safety check
+            if not reported:
+                await msg.reply_text("❌ No valid leads found in text.")
+                return
 
-    # =========================
-    # ANALYTICS
-    # =========================
-    sorted_workshops = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+            # build outputs
+            comparison = compare(baseline, reported)
+            report = build_report(comparison)
 
-    top = sorted_workshops[:3]
-    zero = [w for w, v in totals.items() if v == 0]
-    low = [w for w, v in totals.items() if 1 <= v <= 2]
+            lead_alert = build_lead_alert(reported)
+            leakage_alert = build_leakage_alert(baseline, reported)
 
-    today_date = datetime.now().strftime("%d %b %Y")
+            # send dashboards first
+            await msg.reply_text(lead_alert, parse_mode="Markdown")
+            await msg.reply_text(leakage_alert, parse_mode="Markdown")
 
-    # =========================
-    # DASHBOARD BUILD
-    # =========================
-    lines = [f"📊 *WORKSHOP DASHBOARD — {today_date}*\n"]
+            # then detailed report
+            await msg.reply_text(report, parse_mode="Markdown")
 
-    lines.append("🏆 *Top Workshops*")
-    for i, (w, v) in enumerate(top, 1):
-        lines.append(f"{i}. {w} — {v}")
-    lines.append("")
+            # reset for next cycle
+            user_state[user_id] = {"step": 1, "baseline": {}, "reported": {}}
+
+        else:
+            await msg.reply_text("💬 Please paste text input.")
+        return
+
+# DASHBOARD 1: LEAD ALERT 📊
+# =========================
+def build_lead_alert(reported):
+    sorted_data = sorted(reported.items(), key=lambda x: x[1], reverse=True)
+
+    zero = [w for w, v in reported.items() if v == 0]
+    low = [w for w, v in reported.items() if 1 <= v <= 2]
+    top = sorted_data[:3]
+
+    lines = ["📊 *LEAD COUNT ALERT*\n"]
 
     if zero:
-        lines.append("🚨 *Needs Attention (0 leads)*")
+        lines.append("🚨 *No Leads (0)*")
         for w in zero:
             lines.append(f"• {w} — 0 ❌")
         lines.append("")
@@ -228,33 +260,66 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if low:
         lines.append("⚠️ *Low Leads (1–2)*")
         for w in low:
-            lines.append(f"• {w} — {totals[w]} ⚠️")
+            lines.append(f"• {w} — {reported[w]} ⚠️")
         lines.append("")
 
-    lines.append("👤 *By Salesperson*")
-    for person, workshops in data.items():
-        rows = []
-        for w, v in workshops.items():
-            if v == 0:
-                rows.append(f"{w} {v} ❌")
-            elif v <= 2:
-                rows.append(f"{w} {v} ⚠️")
-            else:
-                rows.append(f"{w} {v}")
+    lines.append("🏆 *Top Performers*")
+    for i, (w, v) in enumerate(top, 1):
+        lines.append(f"{i}. {w} — {v}")
 
-        lines.append(f"\n*{person}*")
-        lines.append(" | ".join(rows))
-
-    lines.append("\n" + trend_text)
-
-    # =========================
-    # SEND OUTPUT
-    # =========================
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    return "\n".join(lines)
 
 
 # =========================
-# BOOT
+# DASHBOARD 2: LEAKAGE ALERT 📉
+# =========================
+def build_leakage_alert(baseline, reported):
+    lines = ["📉 *LEAKAGE ALERT*\n"]
+
+    high_leak = []
+    over = []
+    healthy = []
+
+    all_keys = set(baseline) | set(reported)
+
+    for w in all_keys:
+        base = baseline.get(w, 0)
+        rep = reported.get(w, 0)
+
+        if base == 0:
+            continue
+
+        diff = base - rep
+        leakage_pct = diff / base
+
+        if leakage_pct > 0.4:
+            high_leak.append((w, leakage_pct, base, rep))
+        elif diff < 0:
+            over.append((w, abs(diff)))
+        else:
+            healthy.append(w)
+
+    if high_leak:
+        lines.append("🚨 *High Leakage (>40%)*")
+        for w, pct, base, rep in high_leak:
+            lines.append(f"• {w} — {int(pct*100)}% (Baseline: {base} | Reported: {rep})")
+        lines.append("")
+
+    if over:
+        lines.append("⚠️ *Over-Reporting*")
+        for w, val in over:
+            lines.append(f"• {w} — +{val}")
+        lines.append("")
+
+    if healthy:
+        lines.append("✅ *Healthy*")
+        for w in healthy[:5]:
+            lines.append(f"• {w}")
+
+    return "\n".join(lines)
+
+# =========================
+# BOOT 🚀
 # =========================
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(MessageHandler(filters.ALL, handle_message))
