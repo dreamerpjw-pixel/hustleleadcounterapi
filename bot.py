@@ -409,6 +409,9 @@ app.add_handler(CommandHandler("sample", sample))
 app.add_handler(CommandHandler("status", status))
 
 # Main message handler
-app.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_message))
+app.add_handler(MessageHandler(
+    (filters.TEXT | filters.Document.ALL) & ~filters.COMMAND,
+    handle_message
+))
 
 app.run_polling()
