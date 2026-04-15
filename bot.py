@@ -396,32 +396,17 @@ def build_leakage_alert(baseline, reported):
 
     return "\n".join(lines)
 
-# =========================
-# BOOT 🚀
-# =========================
-app = ApplicationBuilder().token(TOKEN).build()
-
-# Commands
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("help", help_cmd))
-app.add_handler(CommandHandler("reset", reset))
-app.add_handler(CommandHandler("sample", sample))
-app.add_handler(CommandHandler("status", status))
-
-# Main message handler
-app.add_handler(MessageHandler(
-    (filters.TEXT | filters.Document.ALL) & ~filters.COMMAND,
-    handle_message
-))
-
 import asyncio
 from aiohttp import web
 
 WEBHOOK_PATH = "/webhook"
 PORT = int(os.environ.get("PORT", 10000))
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # MUST be set on Render
 
 
+# =========================
+# TELEGRAM HANDLER
+# =========================
 async def handle(request):
     data = await request.json()
 
@@ -431,25 +416,35 @@ async def handle(request):
     return web.Response(text="ok")
 
 
-async def start_bot():
+# =========================
+# LIFECYCLE
+# =========================
+async def on_startup(_):
     await app.initialize()
     await app.start()
+
+    if not WEBHOOK_URL:
+        raise ValueError("WEBHOOK_URL is not set")
+
     await app.bot.set_webhook(WEBHOOK_URL)
 
 
-async def stop_bot():
+async def on_cleanup(_):
     await app.bot.delete_webhook()
     await app.stop()
     await app.shutdown()
 
 
+# =========================
+# SERVER
+# =========================
 def main():
     web_app = web.Application()
 
     web_app.router.add_post(WEBHOOK_PATH, handle)
 
-    web_app.on_startup.append(lambda app_web: start_bot())
-    web_app.on_cleanup.append(lambda app_web: stop_bot())
+    web_app.on_startup.append(on_startup)
+    web_app.on_cleanup.append(on_cleanup)
 
     web.run_app(web_app, host="0.0.0.0", port=PORT)
 
