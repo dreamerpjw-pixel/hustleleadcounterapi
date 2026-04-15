@@ -414,4 +414,26 @@ app.add_handler(MessageHandler(
     handle_message
 ))
 
-app.run_polling()
+from aiohttp import web
+
+PORT = int(os.environ.get("PORT", 10000))
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # set this in Render
+
+async def handle(request):
+    data = await request.json()
+    update = Update.de_json(data, app.bot)
+    await app.process_update(update)
+    return web.Response()
+
+async def on_startup(app_web):
+    await app.bot.set_webhook(WEBHOOK_URL)
+
+async def on_cleanup(app_web):
+    await app.bot.delete_webhook()
+
+web_app = web.Application()
+web_app.router.add_post("/", handle)
+web_app.on_startup.append(on_startup)
+web_app.on_cleanup.append(on_cleanup)
+
+web.run_app(web_app, port=PORT)
