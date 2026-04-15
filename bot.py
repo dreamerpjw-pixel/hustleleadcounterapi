@@ -5,8 +5,15 @@ from io import StringIO
 from collections import defaultdict
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
-from telegram.ext import CommandHandler
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
+
+import asyncio
+from aiohttp import web
 
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
@@ -396,12 +403,18 @@ def build_leakage_alert(baseline, reported):
 
     return "\n".join(lines)
 
-import asyncio
-from aiohttp import web
 
+
+# =========================
+# CONFIG
+# =========================
 WEBHOOK_PATH = "/webhook"
 PORT = int(os.environ.get("PORT", 10000))
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # MUST be set on Render
+
+if not WEBHOOK_URL:
+    raise ValueError("WEBHOOK_URL is not set")
+
 app = ApplicationBuilder().token(TOKEN).build()
 
 
@@ -416,45 +429,56 @@ async def handle(request):
 
     return web.Response(text="ok")
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("help", help_cmd))
-app.add_handler(CommandHandler("reset", reset))
-app.add_handler(CommandHandler("sample", sample))
-app.add_handler(CommandHandler("status", status))
-
-app.add_handler(MessageHandler(filters.ALL, handle_message))
 
 # =========================
-# LIFECYCLE
+# REGISTER HANDLERS
 # =========================
-async def on_startup(_):
+def register_handlers(application):
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_cmd))
+    application.add_handler(CommandHandler("reset", reset))
+    application.add_handler(CommandHandler("sample", sample))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_message))
+
+
+register_handlers(app)
+
+
+# =========================
+# SERVER BOOTSTRAP
+# =========================
+async def runner():
     await app.initialize()
     await app.start()
 
-    if not WEBHOOK_URL:
-        raise ValueError("WEBHOOK_URL is not set")
-
+    # Register webhook AFTER start
     await app.bot.set_webhook(WEBHOOK_URL)
 
-
-async def on_cleanup(_):
-    await app.bot.delete_webhook()
-    await app.stop()
-    await app.shutdown()
-
-
-# =========================
-# SERVER
-# =========================
-def main():
     web_app = web.Application()
-
     web_app.router.add_post(WEBHOOK_PATH, handle)
 
-    web_app.on_startup.append(on_startup)
-    web_app.on_cleanup.append(on_cleanup)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
 
-    web.run_app(web_app, host="0.0.0.0", port=PORT)
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    print("Bot is running...")
+
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        await runner.cleanup()
+        await app.shutdown()
+
+
+# =========================
+# ENTRYPOINT
+# =========================
+def main():
+    asyncio.run(runner())
 
 
 if __name__ == "__main__":
