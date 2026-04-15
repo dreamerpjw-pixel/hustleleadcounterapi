@@ -414,26 +414,45 @@ app.add_handler(MessageHandler(
     handle_message
 ))
 
+import asyncio
 from aiohttp import web
 
+WEBHOOK_PATH = "/webhook"
 PORT = int(os.environ.get("PORT", 10000))
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # set this in Render
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+
 
 async def handle(request):
     data = await request.json()
+
     update = Update.de_json(data, app.bot)
     await app.process_update(update)
-    return web.Response()
 
-async def on_startup(app_web):
+    return web.Response(text="ok")
+
+
+async def start_bot():
+    await app.initialize()
+    await app.start()
     await app.bot.set_webhook(WEBHOOK_URL)
 
-async def on_cleanup(app_web):
+
+async def stop_bot():
     await app.bot.delete_webhook()
+    await app.stop()
+    await app.shutdown()
 
-web_app = web.Application()
-web_app.router.add_post("/", handle)
-web_app.on_startup.append(on_startup)
-web_app.on_cleanup.append(on_cleanup)
 
-web.run_app(web_app, port=PORT)
+def main():
+    web_app = web.Application()
+
+    web_app.router.add_post(WEBHOOK_PATH, handle)
+
+    web_app.on_startup.append(lambda app_web: start_bot())
+    web_app.on_cleanup.append(lambda app_web: stop_bot())
+
+    web.run_app(web_app, host="0.0.0.0", port=PORT)
+
+
+if __name__ == "__main__":
+    main()
