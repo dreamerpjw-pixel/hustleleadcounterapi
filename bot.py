@@ -402,6 +402,7 @@ from aiohttp import web
 WEBHOOK_PATH = "/webhook"
 PORT = int(os.environ.get("PORT", 10000))
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # MUST be set on Render
+app = ApplicationBuilder().token(TOKEN).build()
 
 
 # =========================
@@ -415,6 +416,13 @@ async def handle(request):
 
     return web.Response(text="ok")
 
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("help", help_cmd))
+app.add_handler(CommandHandler("reset", reset))
+app.add_handler(CommandHandler("sample", sample))
+app.add_handler(CommandHandler("status", status))
+
+app.add_handler(MessageHandler(filters.ALL, handle_message))
 
 # =========================
 # LIFECYCLE
