@@ -316,28 +316,22 @@ async def handle(request):
     return web.Response(text="ok")
 
 
-async def runner():
-    await app.initialize()
-    await app.start()
-    await app.bot.set_webhook(WEBHOOK_URL)
+def run_webhook():
+    async def start_bot():
+        await app.initialize()
+        await app.start()
+        await app.bot.set_webhook(WEBHOOK_URL)
 
-    web_app = web.Application()
-    web_app.router.add_post(WEBHOOK_PATH, handle)
+        web_app = web.Application()
+        web_app.router.add_post(WEBHOOK_PATH, handle)
 
-    runner = web.AppRunner(web_app)
-    await runner.setup()
+        print("🔥 BOT RUNNING")
 
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
+        # IMPORTANT: THIS BINDS PORT PROPERLY FOR RENDER
+        web.run_app(web_app, host="0.0.0.0", port=PORT)
 
-    print("🔥 BOT RUNNING")
-
-    await asyncio.Event().wait()
-
-
-def main():
-    asyncio.run(runner())
+    asyncio.run(start_bot())
 
 
 if __name__ == "__main__":
-    main()
+    run_webhook()
