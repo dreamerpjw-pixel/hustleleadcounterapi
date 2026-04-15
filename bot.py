@@ -1,3 +1,7 @@
+print("🔥 BOT STARTING")
+print("TOKEN:", bool(TOKEN))
+print("WEBHOOK:", WEBHOOK_URL)
+
 import os
 import csv
 import re
