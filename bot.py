@@ -6,6 +6,7 @@ from collections import defaultdict
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram.ext import CommandHandler
 
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
@@ -15,6 +16,84 @@ if not TOKEN:
 # STATE STORAGE 🧠
 # =========================
 user_state = {}
+
+# =========================
+# COMMANDS 🎮
+# =========================
+def reset_state(user_id):
+    user_state[user_id] = {"step": 1, "baseline": {}, "reported": {}}
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    reset_state(user_id)
+
+    await update.message.reply_text(
+        "👋 *Welcome to the Leakage Bot*\n\n"
+        "Step 1️⃣: Upload your baseline CSV 📎\n"
+        "Step 2️⃣: Paste reported leads text 💬\n\n"
+        "Use /sample to see format examples.\n"
+        "Use /reset anytime to restart.",
+        parse_mode="Markdown"
+    )
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🆘 *How to use*\n\n"
+        "1. Upload CSV with workshop + count\n"
+        "2. Paste reported text\n\n"
+        "Commands:\n"
+        "/start - Restart flow\n"
+        "/reset - Clear session\n"
+        "/sample - Show examples\n"
+        "/status - Check progress",
+        parse_mode="Markdown"
+    )
+
+
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    reset_state(user_id)
+
+    await update.message.reply_text("🔄 Reset complete. Upload a new CSV to start.")
+
+
+async def sample(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📄 *Sample Formats*\n\n"
+        "*CSV:*\n"
+        "Photography - 6 Apr, 10\n"
+        "Videography - 23 Mar, 5\n\n"
+        "*Text:*\n"
+        "PPE - 8\n"
+        "VVE - 3\n",
+        parse_mode="Markdown"
+    )
+
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    state = user_state.get(user_id, {"step": 1})
+
+    step = state["step"]
+    baseline = "✅" if state.get("baseline") else "❌"
+    reported = "✅" if state.get("reported") else "❌"
+
+    if step == 1:
+        step_text = "Waiting for CSV upload 📎"
+    elif step == 2:
+        step_text = "Waiting for text input 💬"
+    else:
+        step_text = "Processing / Done"
+
+    await update.message.reply_text(
+        f"📊 *Current Status*\n\n"
+        f"Step: {step_text}\n"
+        f"Baseline: {baseline}\n"
+        f"Reported: {reported}",
+        parse_mode="Markdown"
+    )
 
 
 # =========================
@@ -96,7 +175,7 @@ def parse_csv(file_bytes):
 
         # 4. parse count safely
         try:
-            count = int(row[1])
+            count = int(row[1].replace(",", "").strip())
         except:
             continue
 
@@ -110,28 +189,24 @@ def parse_csv(file_bytes):
 # =========================
 def parse_text(text):
     data = defaultdict(int)
-    current = None
 
     for line in text.split("\n"):
         line = line.strip()
         if not line or line.startswith("["):
             continue
 
-        if line.startswith("*") and line.endswith("*"):
-            current = line.strip("*")
+        match = re.match(r"(.+?)\s*[-:]?\s*([\d,]+)", line)
+        if not match:
             continue
 
-        match = re.match(r"(.+?)\s*[-:]?\s*([\d,]+)", line)
-        count = int(match.group(2).replace(",", ""))
-        if match:
-            w = apply_rules(normalize(match.group(1)))
-            if not w:
-                continue
+        w = apply_rules(normalize(match.group(1)))
+        if not w:
+            continue
 
-            data[w] += int(match.group(2))
+        count = int(match.group(2).replace(",", ""))
+        data[w] += count
 
     return dict(data)
-
 
 # =========================
 # STEP 3: LEAKAGE ENGINE 🔍
@@ -180,7 +255,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if user_id not in user_state:
-        user_state[user_id] = {"step": 1, "baseline": {}, "reported": {}}
+        reset_state(user_id)
 
     state = user_state[user_id]
     msg = update.message
@@ -195,6 +270,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             content = file_bytes.decode("utf-8", errors="ignore")
             state["step"] = 2
+            state["baseline"] = parse_csv(file_bytes)
 
             await msg.reply_text("✅ Baseline CSV saved. Now paste reported text leads.")
         else:
@@ -240,6 +316,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("💬 Please paste text input.")
         return
 
+
+# =========================
 # DASHBOARD 1: LEAD ALERT 📊
 # =========================
 def build_lead_alert(reported):
@@ -322,6 +400,15 @@ def build_leakage_alert(baseline, reported):
 # BOOT 🚀
 # =========================
 app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(MessageHandler(filters.ALL, handle_message))
+
+# Commands
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("help", help_cmd))
+app.add_handler(CommandHandler("reset", reset))
+app.add_handler(CommandHandler("sample", sample))
+app.add_handler(CommandHandler("status", status))
+
+# Main message handler
+app.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_message))
 
 app.run_polling()
